@@ -1,9 +1,10 @@
 package tcpsocket
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 var lipsum = `
@@ -19,52 +20,34 @@ Nulla iaculis at dolor aliquam bibendum. Sed arcu tortor, ultrices sit amet conv
 `
 
 func TestSocket(t *testing.T) {
-	server := NewServer()
-	client := NewClient("id-client-1")
-
-	go func() {
-		err := server.Listen("127.0.0.1:9191")
-		assert.Nil(t, err)
-	}()
-
-	for !server.isRunning {
-		time.Sleep(time.Microsecond)
-	}
-
-	err := client.Dial("127.0.0.1:9191")
+	sc, cc, server, _, closeFunc, err := initServerClient(t)
+	defer closeFunc()
 	assert.Nil(t, err)
 
-	defer func() {
-		server.Shutdown()
-		client.Shutdown()
-	}()
+	serverReceivedData := make(chan []byte, 10)
+	clientReceivedData := make(chan []byte, 10)
 
-	chanIds, err := server.ChannelIds()
+	_, err = sc.AddListener(func(data []byte, err error) {
+		serverReceivedData <- data
+	})
 	assert.Nil(t, err)
-	for len(chanIds) <= 0 {
-		chanIds, err = server.ChannelIds()
-		assert.Nil(t, err)
-		time.Sleep(time.Microsecond)
-	}
 
-	clientChan, err := client.Channel()
+	_, err = cc.AddListener(func(data []byte, err error) {
+		clientReceivedData <- data
+	})
 	assert.Nil(t, err)
-	assert.NotNil(t, clientChan)
-
-	serverChan, err := server.Channel("id-client-1")
-	assert.Nil(t, err)
-	assert.NotNil(t, serverChan)
 
 	// Client send
 
-	err = clientChan.Send([]byte("okeoke"))
+	err = cc.Send([]byte("okeoke"), nil)
 	assert.Nil(t, err)
 
-	timeout := 10 * time.Second
-	receive, err := serverChan.Receive(&timeout)
-	assert.Nil(t, err)
-
-	assert.Equal(t, receive, []byte("okeoke"))
+	select {
+	case data := <-serverReceivedData:
+		assert.Equal(t, data, []byte("okeoke"))
+	case <-time.After(10 * time.Second):
+		assert.FailNow(t, "timeout")
+	}
 
 	// Server send
 
@@ -72,24 +55,104 @@ func TestSocket(t *testing.T) {
 		lipsum += lipsum
 	}
 
-	err = serverChan.Send([]byte(lipsum))
+	err = sc.Send([]byte(lipsum), nil)
 	assert.Nil(t, err)
 
-	bytes, err := clientChan.Receive(nil)
-	assert.Nil(t, err)
-
-	assert.Equal(t, bytes, []byte(lipsum))
+	select {
+	case data := <-clientReceivedData:
+		assert.Equal(t, data, []byte(lipsum))
+	case <-time.After(10 * time.Second):
+		assert.FailNow(t, "timeout")
+	}
 
 	// Stop server
 
 	err = server.Shutdown()
 	assert.Nil(t, err)
 
-	//time.Sleep(time.Second)
-	//
-	//err = clientChan.Send([]byte(lipsum))
-	//assert.Nil(t, err)
-	//
-	//err = clientChan.Send([]byte(lipsum))
-	//assert.Nil(t, err)
+	time.Sleep(time.Second)
+
+	timeout := 1 * time.Second
+
+	err = cc.Send([]byte(lipsum), &timeout)
+	assert.Error(t, err)
+
+	err = sc.Send([]byte(lipsum), &timeout)
+	assert.Error(t, err)
+}
+
+func BenchmarkSocket1(b *testing.B) {
+	sc, _, _, _, closeFunc, err := initServerClient(b)
+	defer closeFunc()
+	assert.Nil(b, err)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		err = sc.Send([]byte(lipsum), nil)
+		assert.Nil(b, err)
+	}
+}
+
+func BenchmarkSocket2(b *testing.B) {
+	sc, _, _, _, closeFunc, err := initServerClient(b)
+	defer closeFunc()
+	assert.Nil(b, err)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		err = sc.Send([]byte{}, nil)
+		assert.Nil(b, err)
+	}
+}
+
+func initServerClient(b assert.TestingT) (serverChan, clientChan *tcpChannel, server *Server, client *Client, closeFunc func(), err error) {
+	clientId := "id-client-1"
+	server = NewServer()
+	client = NewClient(clientId)
+
+	go func() {
+		err := server.Listen("127.0.0.1:0")
+		assert.Nil(b, err, err)
+	}()
+
+	tries := 10
+	for !server.IsRunning() && tries > 0 {
+		tries--
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.True(b, server.IsRunning())
+
+	serverAddr, err := server.Address()
+	assert.Nil(b, err)
+
+	err = client.Dial(serverAddr)
+	assert.Nil(b, err)
+
+	closeFunc = func() {
+		server.Shutdown()
+		client.Shutdown()
+	}
+
+	chanIds, err := server.ChannelIds()
+	tries = 10
+	assert.Nil(b, err)
+	for len(chanIds) <= 0 && tries > 0 {
+		tries--
+		chanIds, err = server.ChannelIds()
+		assert.Nil(b, err)
+		time.Sleep(time.Microsecond)
+	}
+	assert.NotEmpty(b, chanIds)
+
+	clientChan, err = client.Channel()
+	assert.Nil(b, err)
+	assert.NotNil(b, clientChan)
+
+	serverChan, err = server.Channel(clientId)
+	assert.Nil(b, err)
+	assert.NotNil(b, serverChan)
+
+	return
 }

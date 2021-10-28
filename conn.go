@@ -13,35 +13,56 @@ type TcpConn struct {
 	reader *bufio.Reader
 }
 
-func NewTcpConn(conn net.Conn) *TcpConn {
+func newTcpConn(conn net.Conn) *TcpConn {
 	return &TcpConn{Conn: conn, reader: bufio.NewReader(conn)}
 }
 
-func (t *TcpConn) ReadData() ([]byte, error) {
+// Datagram
+// 8 byte length (int64) | 16 byte message id | data
+// JOIN packet -> 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+// PING packet -> 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01
+
+//readData returns msgId, data, error
+func (t *TcpConn) readData() (messageId, []byte, error) {
 	lenDataByte := make([]byte, 8)
 	n, err := io.ReadFull(t.reader, lenDataByte)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if n != 8 {
-		return nil, errors.New("invalid packet")
+		return nil, nil, errors.New("invalid message length")
 	}
+
+	msgId := make([]byte, 16)
+	n, err = io.ReadFull(t.reader, msgId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if n != 16 {
+		return nil, nil, errors.New("invalid length of message id")
+	}
+
 	lenData := int64(binary.LittleEndian.Uint64(lenDataByte))
 	data := make([]byte, lenData)
 	n, err = io.ReadFull(t.reader, data)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(n) != lenData {
-		return nil, errors.New("invalid length of data")
+		return nil, nil, errors.New("invalid length of message data")
 	}
-	return data, nil
+	return msgId, data, nil
 }
 
-func (t *TcpConn) WriteData(data []byte) error {
-	dLen := make([]byte, 8)
-	binary.LittleEndian.PutUint64(dLen, uint64(len(data)))
-	_, err := t.Write(dLen)
+func (t *TcpConn) writeData(mId messageId, data []byte) error {
+	if len(mId) != 16 {
+		return errors.New("invalid length of message id")
+	}
+
+	lenAndMsgId := make([]byte, 24)
+	binary.LittleEndian.PutUint64(lenAndMsgId, uint64(len(data)))
+	copy(lenAndMsgId[8:24], mId)
+	_, err := t.Write(lenAndMsgId)
 	if err != nil {
 		return err
 	}
