@@ -5,22 +5,20 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
-type tcpChannel struct {
-	chanId             string
+type TcpChannel struct {
+	chanId             Id
 	incomingData       chan []byte
 	outgoingMessageIds chan []byte
 
-	connPool     map[*TcpConn]*TcpConn
+	connPool     map[*tcpConn]*tcpConn
 	connPoolLock sync.RWMutex
 
-	messages     map[[16]byte]*message
+	messages     map[FixedId]*message
 	messagesLock sync.RWMutex
 
-	listener     map[[16]byte]ChannelListener
+	listener     map[FixedId]ChannelListener
 	listenerLock sync.RWMutex
 
 	isClosed     bool
@@ -29,20 +27,20 @@ type tcpChannel struct {
 
 type ChannelListener func(data []byte, err error)
 
-func newTcpChannel(chanId string) *tcpChannel {
-	c := &tcpChannel{
+func newTcpChannel(chanId Id) *TcpChannel {
+	c := &TcpChannel{
 		chanId:             chanId,
 		incomingData:       make(chan []byte, 256),
 		outgoingMessageIds: make(chan []byte, 256),
-		connPool:           map[*TcpConn]*TcpConn{},
-		messages:           map[[16]byte]*message{},
-		listener:           map[[16]byte]ChannelListener{},
+		connPool:           map[*tcpConn]*tcpConn{},
+		messages:           map[FixedId]*message{},
+		listener:           map[FixedId]ChannelListener{},
 	}
 	go c.receiverDaemon()
 	return c
 }
 
-func (c *tcpChannel) addConn(conn *TcpConn) error {
+func (c *TcpChannel) addConn(conn *tcpConn) error {
 	if c.IsClosed() {
 		return errors.New("channel is closed")
 	}
@@ -56,20 +54,20 @@ func (c *tcpChannel) addConn(conn *TcpConn) error {
 	return nil
 }
 
-func (c *tcpChannel) AddListener(l ChannelListener) (listenerId [16]byte, err error) {
+func (c *TcpChannel) AddListener(l ChannelListener) (listenerId FixedId, err error) {
 	if c.IsClosed() {
 		err = errors.New("channel is closed")
 		return
 	}
 
-	listenerId = uuid.New()
+	listenerId = newId().Fixed()
 	c.listenerLock.Lock()
 	c.listener[listenerId] = l
 	c.listenerLock.Unlock()
 	return
 }
 
-func (c *tcpChannel) RemoveListener(listenerId [16]byte) (err error) {
+func (c *TcpChannel) RemoveListener(listenerId FixedId) (err error) {
 	if c.IsClosed() {
 		return errors.New("channel is closed")
 	}
@@ -84,7 +82,7 @@ func (c *tcpChannel) RemoveListener(listenerId [16]byte) (err error) {
 	return
 }
 
-func (c *tcpChannel) Close() error {
+func (c *TcpChannel) Close() error {
 	c.isClosedLock.Lock()
 	c.isClosed = true
 	c.isClosedLock.Unlock()
@@ -105,7 +103,7 @@ func (c *tcpChannel) Close() error {
 	return nil
 }
 
-func (c *tcpChannel) IsClosed() bool {
+func (c *TcpChannel) IsClosed() bool {
 	c.isClosedLock.RLock()
 	defer func() {
 		c.isClosedLock.RUnlock()
@@ -113,7 +111,7 @@ func (c *tcpChannel) IsClosed() bool {
 	return c.isClosed
 }
 
-func (c *tcpChannel) Send(data []byte, timeout *time.Duration) error {
+func (c *TcpChannel) Send(data []byte, timeout *time.Duration) error {
 	if c.IsClosed() {
 		return errors.New("channel is closed")
 	}
@@ -127,7 +125,7 @@ func (c *tcpChannel) Send(data []byte, timeout *time.Duration) error {
 	msg.Data = data
 
 	c.messagesLock.Lock()
-	c.messages[msg.Id.fixed()] = msg
+	c.messages[msg.Id.Fixed()] = msg
 	c.messagesLock.Unlock()
 
 	c.outgoingMessageIds <- msg.Id
@@ -143,7 +141,7 @@ func (c *tcpChannel) Send(data []byte, timeout *time.Duration) error {
 	}
 }
 
-func (c *tcpChannel) receiverDaemon() {
+func (c *TcpChannel) receiverDaemon() {
 	for !c.IsClosed() {
 		data := <-c.incomingData
 		c.listenerLock.RLock()
@@ -154,13 +152,13 @@ func (c *tcpChannel) receiverDaemon() {
 	}
 }
 
-func (c *tcpChannel) writeDaemon(conn *TcpConn) {
+func (c *TcpChannel) writeDaemon(conn *tcpConn) {
 	for {
 		if c.IsClosed() {
 			return
 		}
 
-		var msgId [16]byte
+		var msgId FixedId
 		copy(msgId[:], <-c.outgoingMessageIds)
 
 		if c.IsClosed() {
@@ -182,7 +180,7 @@ func (c *tcpChannel) writeDaemon(conn *TcpConn) {
 	}
 }
 
-func (c *tcpChannel) readDaemon(conn *TcpConn) {
+func (c *TcpChannel) readDaemon(conn *tcpConn) {
 	for {
 		if c.IsClosed() {
 			log.Println("channel is closed")
@@ -200,8 +198,8 @@ func (c *tcpChannel) readDaemon(conn *TcpConn) {
 			return
 		}
 
-		if msgId.equal(AckId) {
-			var id [16]byte
+		if msgId.Equal(AckId) {
+			var id FixedId
 			copy(id[:], data)
 			c.messagesLock.RLock()
 			if msg, ok := c.messages[id]; msg != nil && ok {

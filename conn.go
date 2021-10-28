@@ -8,22 +8,20 @@ import (
 	"net"
 )
 
-type TcpConn struct {
+type tcpConn struct {
 	net.Conn
 	reader *bufio.Reader
 }
 
-func newTcpConn(conn net.Conn) *TcpConn {
-	return &TcpConn{Conn: conn, reader: bufio.NewReader(conn)}
+func newTcpConn(conn net.Conn) *tcpConn {
+	return &tcpConn{Conn: conn, reader: bufio.NewReader(conn)}
 }
 
 // Datagram
 // 8 byte length (int64) | 16 byte message id | data
-// JOIN packet -> 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-// PING packet -> 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01
 
 //readData returns msgId, data, error
-func (t *TcpConn) readData() (messageId, []byte, error) {
+func (t *tcpConn) readData() (Id, []byte, error) {
 	lenDataByte := make([]byte, 8)
 	n, err := io.ReadFull(t.reader, lenDataByte)
 	if err != nil {
@@ -54,7 +52,7 @@ func (t *TcpConn) readData() (messageId, []byte, error) {
 	return msgId, data, nil
 }
 
-func (t *TcpConn) writeData(mId messageId, data []byte) error {
+func (t *tcpConn) writeData(mId Id, data []byte) error {
 	if len(mId) != 16 {
 		return errors.New("invalid length of message id")
 	}

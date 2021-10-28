@@ -5,7 +5,7 @@ import (
 )
 
 type message struct {
-	Id     messageId
+	Id     Id
 	Data   []byte
 	IsSent chan bool
 }
@@ -20,34 +20,4 @@ var (
 func newMessage() *message {
 	id := uuid.New()
 	return &message{Id: id[:], IsSent: make(chan bool, 1)}
-}
-
-type messageId []byte
-
-func (m messageId) equal(other interface{}) bool {
-	o, ok := other.(messageId)
-	if !ok {
-		arrBytes, ok := other.([16]byte)
-		if !ok {
-			return false
-		}
-		o = arrBytes[:]
-	}
-
-	if len(o) != len(m) {
-		return false
-	}
-
-	for i, v := range m {
-		if v != o[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (m messageId) fixed() (b [16]byte) {
-	copy(b[:], m)
-	return
 }
