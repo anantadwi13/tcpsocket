@@ -7,15 +7,10 @@ import (
 )
 
 type Client struct {
-	clientId      string
-	isRunning     bool
-	isRunningLock sync.RWMutex
-	tcpChannel    *tcpChannel
-	chanLock      sync.RWMutex
-}
-
-func NewClient(clientId string) *Client {
-	return &Client{clientId: clientId}
+	isRunning      bool
+	isRunningLock  sync.RWMutex
+	tcpChannel     *TcpChannel
+	tcpChannelLock sync.RWMutex
 }
 
 func (c *Client) IsRunning() bool {
@@ -26,50 +21,67 @@ func (c *Client) IsRunning() bool {
 	return c.isRunning
 }
 
-func (c *Client) Dial(address string) error {
-	if c.IsRunning() {
-		return errors.New("client is already running")
+func Dial(address string) (c *Client, err error) {
+	c = &Client{isRunning: true}
+
+	defer func() {
+		if err != nil {
+			c.Shutdown()
+		}
+	}()
+
+	chanId := newId()
+
+	c.tcpChannelLock.Lock()
+	c.tcpChannel = newTcpChannel(chanId)
+	c.tcpChannelLock.Unlock()
+
+	current := 5
+	for current > 0 {
+		var (
+			conn  net.Conn
+			msgId Id
+			data  []byte
+		)
+		conn, err = net.Dial("tcp", address)
+		if err != nil {
+			return
+		}
+		tcpConn := newTcpConn(conn)
+		err = tcpConn.writeData(JoinReqId[:], chanId)
+		if err != nil {
+			return
+		}
+
+		msgId, data, err = tcpConn.readData()
+		if err != nil {
+			return
+		}
+
+		if !msgId.Equal(JoinOkId) || !c.tcpChannel.chanId.Equal(data) {
+			err = errors.New("unable to dial connection")
+			return
+		}
+		c.tcpChannelLock.RLock()
+		err = c.tcpChannel.addConn(tcpConn)
+		c.tcpChannelLock.RUnlock()
+		if err != nil {
+			return
+		}
+		current--
 	}
 
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		return err
-	}
-	c.isRunningLock.Lock()
-	c.isRunning = true
-	c.isRunningLock.Unlock()
-
-	tcpConn := newTcpConn(conn)
-	err = tcpConn.writeData(JoinReqId[:], []byte(c.clientId))
-	if err != nil {
-		return err
-	}
-
-	msgId, data, err := tcpConn.readData()
-	if err != nil {
-		return err
-	}
-
-	if !msgId.equal(JoinOkId) || string(data) != c.clientId {
-		return errors.New("unable to dial connection")
-	}
-
-	c.chanLock.Lock()
-	c.tcpChannel = newTcpChannel(c.clientId)
-	c.tcpChannel.addConn(tcpConn)
-	c.chanLock.Unlock()
-
-	return nil
+	return
 }
 
 func (c *Client) Shutdown() error {
 	c.isRunningLock.Lock()
 	c.isRunning = false
 	c.isRunningLock.Unlock()
-	c.chanLock.Lock()
+	c.tcpChannelLock.Lock()
 	defer func() {
 		c.tcpChannel = nil
-		c.chanLock.Unlock()
+		c.tcpChannelLock.Unlock()
 	}()
 	err := c.tcpChannel.Close()
 	if err != nil {
@@ -78,14 +90,14 @@ func (c *Client) Shutdown() error {
 	return nil
 }
 
-func (c *Client) Channel() (*tcpChannel, error) {
+func (c *Client) Channel() (*TcpChannel, error) {
 	if !c.IsRunning() {
 		return nil, errors.New("client is not running")
 	}
 
-	c.chanLock.RLock()
+	c.tcpChannelLock.RLock()
 	defer func() {
-		c.chanLock.RUnlock()
+		c.tcpChannelLock.RUnlock()
 	}()
 	return c.tcpChannel, nil
 }
