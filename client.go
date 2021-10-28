@@ -7,51 +7,65 @@ import (
 )
 
 type Client struct {
-	clientId    string
-	isRunning   bool
-	runningLock sync.RWMutex
-	tcpChannel  *TcpChannel
-	chanLock    sync.RWMutex
+	clientId      string
+	isRunning     bool
+	isRunningLock sync.RWMutex
+	tcpChannel    *tcpChannel
+	chanLock      sync.RWMutex
 }
 
 func NewClient(clientId string) *Client {
 	return &Client{clientId: clientId}
 }
 
+func (c *Client) IsRunning() bool {
+	c.isRunningLock.RLock()
+	defer func() {
+		c.isRunningLock.RUnlock()
+	}()
+	return c.isRunning
+}
+
 func (c *Client) Dial(address string) error {
-	c.runningLock.RLock()
-	if c.isRunning {
-		c.runningLock.RUnlock()
+	if c.IsRunning() {
 		return errors.New("client is already running")
 	}
-	c.runningLock.RUnlock()
 
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return err
 	}
-	c.runningLock.Lock()
+	c.isRunningLock.Lock()
 	c.isRunning = true
-	c.runningLock.Unlock()
+	c.isRunningLock.Unlock()
 
-	tcpConn := NewTcpConn(conn)
-	err = tcpConn.WriteData([]byte(c.clientId))
+	tcpConn := newTcpConn(conn)
+	err = tcpConn.writeData(JoinReqId[:], []byte(c.clientId))
 	if err != nil {
 		return err
 	}
 
+	msgId, data, err := tcpConn.readData()
+	if err != nil {
+		return err
+	}
+
+	if !msgId.equal(JoinOkId) || string(data) != c.clientId {
+		return errors.New("unable to dial connection")
+	}
+
 	c.chanLock.Lock()
-	c.tcpChannel = NewTcpChannel(c.clientId)
-	c.tcpChannel.AddConn(tcpConn)
+	c.tcpChannel = newTcpChannel(c.clientId)
+	c.tcpChannel.addConn(tcpConn)
 	c.chanLock.Unlock()
 
 	return nil
 }
 
 func (c *Client) Shutdown() error {
-	c.runningLock.Lock()
+	c.isRunningLock.Lock()
 	c.isRunning = false
-	c.runningLock.Unlock()
+	c.isRunningLock.Unlock()
 	c.chanLock.Lock()
 	defer func() {
 		c.tcpChannel = nil
@@ -64,13 +78,10 @@ func (c *Client) Shutdown() error {
 	return nil
 }
 
-func (c *Client) Channel() (*TcpChannel, error) {
-	c.runningLock.RLock()
-	if !c.isRunning {
-		c.runningLock.RUnlock()
+func (c *Client) Channel() (*tcpChannel, error) {
+	if !c.IsRunning() {
 		return nil, errors.New("client is not running")
 	}
-	c.runningLock.RUnlock()
 
 	c.chanLock.RLock()
 	defer func() {

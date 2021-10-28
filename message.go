@@ -4,16 +4,50 @@ import (
 	"github.com/google/uuid"
 )
 
-type Message struct {
-	id      [16]byte
-	Request []byte
-	Reply   []byte
+type message struct {
+	Id     messageId
+	Data   []byte
+	IsSent chan bool
 }
 
-func NewMessage() *Message {
-	return &Message{id: uuid.New()}
+var (
+	JoinReqId = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	JoinOkId  = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	PingId    = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0}
+	AckId     = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0}
+)
+
+func newMessage() *message {
+	id := uuid.New()
+	return &message{Id: id[:], IsSent: make(chan bool, 1)}
 }
 
-func (m *Message) Id() [16]byte {
-	return m.id
+type messageId []byte
+
+func (m messageId) equal(other interface{}) bool {
+	o, ok := other.(messageId)
+	if !ok {
+		arrBytes, ok := other.([16]byte)
+		if !ok {
+			return false
+		}
+		o = arrBytes[:]
+	}
+
+	if len(o) != len(m) {
+		return false
+	}
+
+	for i, v := range m {
+		if v != o[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (m messageId) fixed() (b [16]byte) {
+	copy(b[:], m)
+	return
 }

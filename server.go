@@ -8,14 +8,23 @@ import (
 )
 
 type Server struct {
-	isRunning   bool
-	runningLock sync.RWMutex
-	tcpChannels map[string]*TcpChannel
-	chanLock    sync.RWMutex
+	isRunning     bool
+	isRunningLock sync.RWMutex
+	tcpChannels   map[string]*tcpChannel
+	chanLock      sync.RWMutex
+	listener      net.Listener
 }
 
 func NewServer() *Server {
-	return &Server{tcpChannels: make(map[string]*TcpChannel)}
+	return &Server{tcpChannels: make(map[string]*tcpChannel)}
+}
+
+func (s *Server) IsRunning() bool {
+	s.isRunningLock.RLock()
+	defer func() {
+		s.isRunningLock.RUnlock()
+	}()
+	return s.isRunning
 }
 
 func (s *Server) Listen(address string) error {
@@ -23,30 +32,25 @@ func (s *Server) Listen(address string) error {
 	if err != nil {
 		return err
 	}
-	s.runningLock.Lock()
+	s.listener = listen
+	s.isRunningLock.Lock()
 	s.isRunning = true
-	s.runningLock.Unlock()
+	s.isRunningLock.Unlock()
 
 	for {
-		s.runningLock.RLock()
-		if !s.isRunning {
-			s.runningLock.RUnlock()
+		if !s.IsRunning() {
 			return nil
 		}
-		s.runningLock.RUnlock()
 
 		conn, err := listen.Accept()
 		if err != nil {
 			log.Println(err)
 		}
 
-		s.runningLock.RLock()
-		if !s.isRunning {
-			s.runningLock.RUnlock()
+		if !s.IsRunning() {
 			conn.Close()
 			return nil
 		}
-		s.runningLock.RUnlock()
 
 		go func(conn net.Conn) {
 			defer func() {
@@ -55,31 +59,38 @@ func (s *Server) Listen(address string) error {
 				}
 			}()
 
-			tcpConn := NewTcpConn(conn)
+			tcpConn := newTcpConn(conn)
 
-			chanIdBytes, err := tcpConn.ReadData()
+			mId, chanIdBytes, err := tcpConn.readData()
 			if err != nil {
 				log.Panicln(err)
+			}
+
+			if !mId.equal(JoinReqId) {
+				tcpConn.Close()
+				log.Panicln("unable to join, join packet is required, found ", mId)
 			}
 
 			chanId := string(chanIdBytes)
 			s.chanLock.Lock()
 			if s.tcpChannels[chanId] == nil {
-				s.tcpChannels[chanId] = NewTcpChannel(chanId)
+				s.tcpChannels[chanId] = newTcpChannel(chanId)
 			}
 			s.chanLock.Unlock()
-			err = s.tcpChannels[chanId].AddConn(tcpConn)
+			err = s.tcpChannels[chanId].addConn(tcpConn)
 			if err != nil {
+				tcpConn.Close()
 				log.Panicln(err)
 			}
+			tcpConn.writeData(JoinOkId[:], chanIdBytes)
 		}(conn)
 	}
 }
 
 func (s *Server) Shutdown() error {
-	s.runningLock.Lock()
+	s.isRunningLock.Lock()
 	s.isRunning = false
-	s.runningLock.Unlock()
+	s.isRunningLock.Unlock()
 	s.chanLock.Lock()
 	for chanId, channel := range s.tcpChannels {
 		channel.Close()
@@ -89,13 +100,20 @@ func (s *Server) Shutdown() error {
 	return nil
 }
 
+func (s *Server) Address() (string, error) {
+	if !s.IsRunning() {
+		return "", errors.New("server is not running")
+	}
+	if s.listener == nil {
+		return "", errors.New("server is not listening to port")
+	}
+	return s.listener.Addr().String(), nil
+}
+
 func (s *Server) ChannelIds() ([]string, error) {
-	s.runningLock.RLock()
-	if !s.isRunning {
-		s.runningLock.RUnlock()
+	if !s.IsRunning() {
 		return nil, errors.New("server is not running")
 	}
-	s.runningLock.RUnlock()
 
 	s.chanLock.RLock()
 	cIds := make([]string, len(s.tcpChannels))
@@ -108,13 +126,10 @@ func (s *Server) ChannelIds() ([]string, error) {
 	return cIds, nil
 }
 
-func (s *Server) Channel(channelId string) (*TcpChannel, error) {
-	s.runningLock.RLock()
-	if !s.isRunning {
-		s.runningLock.RUnlock()
+func (s *Server) Channel(channelId string) (*tcpChannel, error) {
+	if !s.IsRunning() {
 		return nil, errors.New("server is not running")
 	}
-	s.runningLock.RUnlock()
 
 	s.chanLock.RLock()
 	defer func() {
