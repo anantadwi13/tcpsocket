@@ -27,12 +27,12 @@ func TestSocket(t *testing.T) {
 	serverReceivedData := make(chan []byte, 10)
 	clientReceivedData := make(chan []byte, 10)
 
-	_, err = sc.AddListener(func(data []byte, err error) {
+	_, err = sc.AddReadListener(func(data []byte, err error) {
 		serverReceivedData <- data
 	})
 	assert.Nil(t, err)
 
-	_, err = cc.AddListener(func(data []byte, err error) {
+	_, err = cc.AddReadListener(func(data []byte, err error) {
 		clientReceivedData <- data
 	})
 	assert.Nil(t, err)
@@ -93,19 +93,24 @@ func TestSocket(t *testing.T) {
 }
 
 func TestSocketClosedConnection(t *testing.T) {
-	sc, cc, _, _, closeFunc, err := initServerClient(t)
+	_, cc, server, _, closeFunc, err := initServerClient(t)
 	defer closeFunc()
 	assert.Nil(t, err)
 
 	serverReceivedData := make(chan []byte, 10)
 	clientReceivedData := make(chan []byte, 10)
 
-	_, err = sc.AddListener(func(data []byte, err error) {
-		serverReceivedData <- data
+	_, err = server.AddListener(func(channel *TcpChannel, err error) {
+		if channel.ChanId().Equal(cc.ChanId()) {
+			_, err = channel.AddReadListener(func(data []byte, err error) {
+				serverReceivedData <- data
+			})
+			assert.Nil(t, err)
+		}
 	})
 	assert.Nil(t, err)
 
-	_, err = cc.AddListener(func(data []byte, err error) {
+	_, err = cc.AddReadListener(func(data []byte, err error) {
 		clientReceivedData <- data
 	})
 	assert.Nil(t, err)
@@ -187,9 +192,9 @@ func initServerClient(t assert.TestingT) (serverChan, clientChan *TcpChannel, se
 	assert.NotNil(t, client)
 
 	closeFunc = func() {
-		err = server.Shutdown()
-		assert.Nil(t, err)
 		err = client.Shutdown()
+		assert.Nil(t, err)
+		err = server.Shutdown()
 		assert.Nil(t, err)
 	}
 
