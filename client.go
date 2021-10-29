@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 )
 
 type Client struct {
@@ -27,8 +28,6 @@ func (c *Client) IsRunning() bool {
 func Dial(address string) (c *Client, err error) {
 	c = &Client{chanId: newId(), address: address, isRunning: true}
 
-	c.closeFunc = c.closedConnectionHandler()
-
 	defer func() {
 		if err != nil {
 			c.Shutdown()
@@ -37,6 +36,7 @@ func Dial(address string) (c *Client, err error) {
 
 	c.tcpChannelLock.Lock()
 	c.tcpChannel = newTcpChannel(c.chanId)
+	c.closeFunc = c.closedConnectionHandler(c.tcpChannel)
 	c.tcpChannelLock.Unlock()
 
 	current := 5
@@ -86,20 +86,23 @@ func (c *Client) createConnection() (err error) {
 }
 
 func (c *Client) Shutdown() error {
+	if !c.IsRunning() {
+		return nil
+	}
+
 	c.isRunningLock.Lock()
 	c.isRunning = false
 	c.isRunningLock.Unlock()
-	c.tcpChannelLock.Lock()
-	defer func() {
-		c.tcpChannel = nil
-		c.tcpChannelLock.Unlock()
-	}()
-	if c.tcpChannel == nil {
-		return nil
-	}
-	err := c.tcpChannel.Close()
-	if err != nil {
-		return err
+
+	c.tcpChannelLock.RLock()
+	if tcpChan := c.tcpChannel; tcpChan != nil {
+		c.tcpChannelLock.RUnlock()
+		err := tcpChan.Close()
+		if err != nil {
+			return err
+		}
+	} else {
+		c.tcpChannelLock.RUnlock()
 	}
 	c.closeFunc()
 	c.closeFunc = nil
@@ -118,7 +121,7 @@ func (c *Client) Channel() (*TcpChannel, error) {
 	return c.tcpChannel, nil
 }
 
-func (c *Client) closedConnectionHandler() (f closeFunc) {
+func (c *Client) closedConnectionHandler(tcpChan *TcpChannel) (f closeFunc) {
 	signalChan := make(chan bool, 1)
 
 	f = func() {
@@ -127,17 +130,13 @@ func (c *Client) closedConnectionHandler() (f closeFunc) {
 
 	go func() {
 		for c.IsRunning() {
-			c.tcpChannelLock.RLock()
-			tcpChan := c.tcpChannel
-			if tcpChan == nil {
-				continue
-			}
-			c.tcpChannelLock.RUnlock()
 			select {
-			case <-tcpChan.closedConn:
+			case closedConn := <-tcpChan.closedConn:
 				err := c.createConnection()
 				if err != nil {
 					//log.Println(err)
+					tcpChan.closedConn <- closedConn
+					time.Sleep(100 * time.Millisecond)
 					continue
 				}
 			case <-signalChan:
