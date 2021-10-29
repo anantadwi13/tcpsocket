@@ -13,10 +13,14 @@ type Server struct {
 	tcpChannels     map[FixedId]*TcpChannel
 	tcpChannelsLock sync.RWMutex
 	listener        net.Listener
+	closeFuncs      []closeFunc
+	closeFuncsLock  sync.Mutex
 }
 
 func NewServer() *Server {
-	return &Server{tcpChannels: make(map[FixedId]*TcpChannel)}
+	return &Server{
+		tcpChannels: make(map[FixedId]*TcpChannel),
+	}
 }
 
 func (s *Server) Listen(address string) error {
@@ -71,6 +75,9 @@ func (s *Server) Listen(address string) error {
 			s.tcpChannelsLock.Lock()
 			if s.tcpChannels[chanIdFixed] == nil {
 				s.tcpChannels[chanIdFixed] = newTcpChannel(chanIdBytes)
+				s.closeFuncsLock.Lock()
+				s.closeFuncs = append(s.closeFuncs, s.closedConnectionHandler(s.tcpChannels[chanIdFixed]))
+				s.closeFuncsLock.Unlock()
 			}
 			s.tcpChannelsLock.Unlock()
 			s.tcpChannelsLock.RLock()
@@ -103,6 +110,12 @@ func (s *Server) Shutdown() error {
 		delete(s.tcpChannels, chanId)
 	}
 	s.tcpChannelsLock.Unlock()
+	s.closeFuncsLock.Lock()
+	for _, f := range s.closeFuncs {
+		f()
+	}
+	s.closeFuncs = []closeFunc{}
+	s.closeFuncsLock.Unlock()
 	return nil
 }
 
@@ -142,4 +155,24 @@ func (s *Server) Channel(channelId Id) (*TcpChannel, error) {
 		s.tcpChannelsLock.RUnlock()
 	}()
 	return s.tcpChannels[channelId.Fixed()], nil
+}
+
+func (s *Server) closedConnectionHandler(tcpChan *TcpChannel) (f closeFunc) {
+	signalChan := make(chan bool, 1)
+
+	f = func() {
+		signalChan <- true
+	}
+
+	go func() {
+		for s.IsRunning() {
+			select {
+			case <-tcpChan.closedConn:
+			case <-signalChan:
+				return
+			}
+		}
+	}()
+
+	return
 }
