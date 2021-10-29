@@ -8,12 +8,14 @@ import (
 )
 
 type TcpChannel struct {
-	chanId             Id
-	incomingData       chan []byte
-	outgoingMessageIds chan []byte
+	chanId                Id
+	incomingData          chan []byte
+	outgoingMessageIds    chan []byte
+	rescheduledMessageIds chan []byte
 
 	connPool     map[*tcpConn]*tcpConn
 	connPoolLock sync.RWMutex
+	closedConn   chan *tcpConn
 
 	messages     map[FixedId]*message
 	messagesLock sync.RWMutex
@@ -21,22 +23,29 @@ type TcpChannel struct {
 	listener     map[FixedId]ChannelListener
 	listenerLock sync.RWMutex
 
-	isClosed     bool
-	isClosedLock sync.RWMutex
+	isClosed            bool
+	isClosedLock        sync.RWMutex
+	receiverCloseFunc   closeFunc
+	writeCloseFuncs     map[*tcpConn]closeFunc
+	writeCloseFuncsLock sync.Mutex
 }
 
 type ChannelListener func(data []byte, err error)
+type closeFunc func()
 
 func newTcpChannel(chanId Id) *TcpChannel {
 	c := &TcpChannel{
-		chanId:             chanId,
-		incomingData:       make(chan []byte, 256),
-		outgoingMessageIds: make(chan []byte, 256),
-		connPool:           map[*tcpConn]*tcpConn{},
-		messages:           map[FixedId]*message{},
-		listener:           map[FixedId]ChannelListener{},
+		chanId:                chanId,
+		incomingData:          make(chan []byte, 256),
+		outgoingMessageIds:    make(chan []byte, 256),
+		rescheduledMessageIds: make(chan []byte, 256),
+		connPool:              map[*tcpConn]*tcpConn{},
+		closedConn:            make(chan *tcpConn, 256),
+		messages:              map[FixedId]*message{},
+		listener:              map[FixedId]ChannelListener{},
+		writeCloseFuncs:       map[*tcpConn]closeFunc{},
 	}
-	go c.receiverDaemon()
+	c.receiverCloseFunc = c.receiverDaemon()
 	return c
 }
 
@@ -49,8 +58,10 @@ func (c *TcpChannel) addConn(conn *tcpConn) error {
 	c.connPool[conn] = conn
 	c.connPoolLock.Unlock()
 
-	go c.writeDaemon(conn)
-	go c.readDaemon(conn)
+	c.writeCloseFuncsLock.Lock()
+	c.writeCloseFuncs[conn] = c.writeDaemon(conn)
+	c.writeCloseFuncsLock.Unlock()
+	c.readDaemon(conn)
 	return nil
 }
 
@@ -99,6 +110,18 @@ func (c *TcpChannel) Close() error {
 		conn.Close()
 	}
 	c.connPoolLock.Unlock()
+
+	c.writeCloseFuncsLock.Lock()
+	for conn, f := range c.writeCloseFuncs {
+		f()
+		delete(c.writeCloseFuncs, conn)
+	}
+	c.writeCloseFuncsLock.Unlock()
+
+	close(c.incomingData)
+	close(c.outgoingMessageIds)
+	close(c.rescheduledMessageIds)
+	close(c.closedConn)
 	// todo wrap error
 	return nil
 }
@@ -122,96 +145,162 @@ func (c *TcpChannel) Send(data []byte, timeout *time.Duration) error {
 	}
 
 	msg := newMessage()
-	msg.Data = data
+	msg.data = data
 
 	c.messagesLock.Lock()
-	c.messages[msg.Id.Fixed()] = msg
+	c.messages[msg.id.Fixed()] = msg
 	c.messagesLock.Unlock()
 
-	c.outgoingMessageIds <- msg.Id
+	c.outgoingMessageIds <- msg.id
 
-	select {
-	case isSent := <-msg.IsSent:
-		if !isSent {
-			return errors.New("data is not sent")
-		}
-		return nil
-	case <-time.After(*timeout):
-		return errors.New("timeout")
-	}
-}
-
-func (c *TcpChannel) receiverDaemon() {
-	for !c.IsClosed() {
-		data := <-c.incomingData
-		c.listenerLock.RLock()
-		for _, listener := range c.listener {
-			go listener(data, nil)
-		}
-		c.listenerLock.RUnlock()
-	}
-}
-
-func (c *TcpChannel) writeDaemon(conn *tcpConn) {
+	timeoutAfter := time.After(*timeout)
 	for {
-		if c.IsClosed() {
-			return
-		}
-
-		var msgId FixedId
-		copy(msgId[:], <-c.outgoingMessageIds)
-
-		if c.IsClosed() {
-			return
-		}
-
-		c.messagesLock.RLock()
-		msg := c.messages[msgId]
-		if msg == nil {
-			c.messagesLock.RUnlock()
-			continue
-		}
-		c.messagesLock.RUnlock()
-
-		err := conn.writeData(msgId[:], msg.Data)
-		if err != nil {
-			return
+		select {
+		case isSent := <-msg.isSent:
+			if isSent {
+				return nil
+			}
+		case <-timeoutAfter:
+			return errors.New("timeout")
 		}
 	}
+}
+
+func (c *TcpChannel) receiverDaemon() (f closeFunc) {
+	signalChan := make(chan bool, 1)
+
+	f = func() {
+		signalChan <- true
+	}
+
+	go func() {
+		for !c.IsClosed() {
+			select {
+			case data := <-c.incomingData:
+				c.listenerLock.RLock()
+				for _, listener := range c.listener {
+					go listener(data, nil)
+				}
+				c.listenerLock.RUnlock()
+			case <-signalChan:
+				return
+			}
+		}
+	}()
+
+	return
+}
+
+func (c *TcpChannel) writeDaemon(conn *tcpConn) (f closeFunc) {
+	signalChan := make(chan bool, 1)
+
+	f = func() {
+		signalChan <- true
+	}
+
+	go func() {
+		defer func() {
+			if c.IsClosed() {
+				return
+			}
+
+			c.connPoolLock.Lock()
+			if _, ok := c.connPool[conn]; ok {
+				delete(c.connPool, conn)
+				conn.Close()
+				c.closedConn <- conn
+			}
+			c.connPoolLock.Unlock()
+		}()
+		for {
+			if c.IsClosed() {
+				return
+			}
+
+			var (
+				msgId FixedId
+				mId   []byte
+			)
+
+			select {
+			case mId = <-c.rescheduledMessageIds:
+				copy(msgId[:], mId)
+			case mId = <-c.outgoingMessageIds:
+				copy(msgId[:], mId)
+			case <-signalChan:
+				return
+			}
+
+			if c.IsClosed() {
+				return
+			}
+
+			c.messagesLock.RLock()
+			msg := c.messages[msgId]
+			if msg == nil {
+				c.messagesLock.RUnlock()
+				continue
+			}
+			c.messagesLock.RUnlock()
+
+			err := conn.writeData(msgId[:], msg.data)
+			if err != nil {
+				c.rescheduledMessageIds <- msgId[:]
+				return
+			}
+		}
+	}()
+
+	return
 }
 
 func (c *TcpChannel) readDaemon(conn *tcpConn) {
-	for {
-		if c.IsClosed() {
-			log.Println("channel is closed")
-			return
-		}
-
-		msgId, data, err := conn.readData()
-		if err != nil {
-			//log.Println(err)
-			return
-		}
-
-		if c.IsClosed() {
-			log.Println("channel is closed")
-			return
-		}
-
-		if msgId.Equal(AckId) {
-			var id FixedId
-			copy(id[:], data)
-			c.messagesLock.RLock()
-			if msg, ok := c.messages[id]; msg != nil && ok {
-				msg.IsSent <- true
+	go func() {
+		defer func() {
+			if c.IsClosed() {
+				return
 			}
-			c.messagesLock.RUnlock()
-		} else {
-			err = conn.writeData(AckId[:], msgId)
+
+			c.connPoolLock.Lock()
+			if _, ok := c.connPool[conn]; ok {
+				delete(c.connPool, conn)
+				conn.Close()
+				c.closedConn <- conn
+			}
+			c.connPoolLock.Unlock()
+		}()
+		for {
+			if c.IsClosed() {
+				log.Println("channel is closed")
+				return
+			}
+
+			msgId, data, err := conn.readData()
 			if err != nil {
-				continue
+				//log.Println(err)
+				return
 			}
-			c.incomingData <- data
+
+			if c.IsClosed() {
+				log.Println("channel is closed")
+				return
+			}
+
+			if msgId.Equal(AckId) {
+				var id FixedId
+				copy(id[:], data)
+				c.messagesLock.RLock()
+				if msg, ok := c.messages[id]; msg != nil && ok {
+					msg.isSent <- true
+				}
+				c.messagesLock.RUnlock()
+			} else {
+				err = conn.writeData(AckId[:], msgId)
+				if err != nil {
+					continue
+				}
+				c.incomingData <- data
+			}
 		}
-	}
+	}()
 }

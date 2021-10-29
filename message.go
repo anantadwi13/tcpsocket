@@ -5,9 +5,9 @@ import (
 )
 
 type message struct {
-	Id     Id
-	Data   []byte
-	IsSent chan bool
+	id     Id
+	data   []byte
+	isSent chan bool
 }
 
 var (
@@ -19,5 +19,6 @@ var (
 
 func newMessage() *message {
 	id := uuid.New()
-	return &message{Id: id[:], IsSent: make(chan bool, 1)}
+	msg := &message{id: id[:], isSent: make(chan bool, 1)}
+	return msg
 }

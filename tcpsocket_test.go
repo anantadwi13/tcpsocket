@@ -20,7 +20,7 @@ Nulla iaculis at dolor aliquam bibendum. Sed arcu tortor, ultrices sit amet conv
 `
 
 func TestSocket(t *testing.T) {
-	sc, cc, server, _, closeFunc, err := initServerClient(t)
+	sc, cc, server, client, closeFunc, err := initServerClient(t)
 	defer closeFunc()
 	assert.Nil(t, err)
 
@@ -79,6 +79,7 @@ func TestSocket(t *testing.T) {
 
 	// Stop server
 
+	_, _ = server, client
 	err = server.Shutdown()
 	assert.Nil(t, err)
 
@@ -91,6 +92,50 @@ func TestSocket(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestSocketClosedConnection(t *testing.T) {
+	sc, cc, _, _, closeFunc, err := initServerClient(t)
+	defer closeFunc()
+	assert.Nil(t, err)
+
+	serverReceivedData := make(chan []byte, 10)
+	clientReceivedData := make(chan []byte, 10)
+
+	_, err = sc.AddListener(func(data []byte, err error) {
+		serverReceivedData <- data
+	})
+	assert.Nil(t, err)
+
+	_, err = cc.AddListener(func(data []byte, err error) {
+		clientReceivedData <- data
+	})
+	assert.Nil(t, err)
+
+	// Close connections
+
+	cc.connPoolLock.Lock()
+	for conn := range cc.connPool {
+		delete(cc.connPool, conn)
+		err = conn.Close()
+		assert.Nil(t, err)
+		cc.closedConn <- conn
+	}
+	cc.connPoolLock.Unlock()
+
+	// Client send
+
+	timeout := 5 * time.Second
+
+	err = cc.Send([]byte("okeoke"), &timeout)
+	assert.Nil(t, err)
+
+	select {
+	case data := <-serverReceivedData:
+		assert.Equal(t, data, []byte("okeoke"))
+	case <-time.After(timeout):
+		assert.FailNow(t, "timeout")
+	}
+}
+
 func BenchmarkSocket1(b *testing.B) {
 	sc, _, _, _, closeFunc, err := initServerClient(b)
 	defer closeFunc()
@@ -98,8 +143,10 @@ func BenchmarkSocket1(b *testing.B) {
 
 	b.ResetTimer()
 
+	data := []byte(lipsum)
+
 	for i := 0; i < b.N; i++ {
-		err = sc.Send([]byte(lipsum), nil)
+		err = sc.Send(data, nil)
 		assert.Nil(b, err)
 	}
 }
@@ -117,12 +164,12 @@ func BenchmarkSocket2(b *testing.B) {
 	}
 }
 
-func initServerClient(b assert.TestingT) (serverChan, clientChan *TcpChannel, server *Server, client *Client, closeFunc func(), err error) {
+func initServerClient(t assert.TestingT) (serverChan, clientChan *TcpChannel, server *Server, client *Client, closeFunc func(), err error) {
 	server = NewServer()
 
 	go func() {
 		err := server.Listen("127.0.0.1:0")
-		assert.Nil(b, err, err)
+		assert.Nil(t, err, err)
 	}()
 
 	tries := 10
@@ -130,45 +177,47 @@ func initServerClient(b assert.TestingT) (serverChan, clientChan *TcpChannel, se
 		tries--
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.True(b, server.IsRunning())
+	assert.True(t, server.IsRunning())
 
 	serverAddr, err := server.Address()
-	assert.Nil(b, err)
+	assert.Nil(t, err)
 
 	client, err = Dial(serverAddr)
-	assert.Nil(b, err)
-	assert.NotNil(b, client)
+	assert.Nil(t, err)
+	assert.NotNil(t, client)
 
 	closeFunc = func() {
-		server.Shutdown()
-		client.Shutdown()
+		err = server.Shutdown()
+		assert.Nil(t, err)
+		err = client.Shutdown()
+		assert.Nil(t, err)
 	}
 
 	chanIds, err := server.ChannelIds()
 	tries = 10
-	assert.Nil(b, err)
+	assert.Nil(t, err)
 	for len(chanIds) <= 0 && tries > 0 {
 		tries--
 		chanIds, err = server.ChannelIds()
-		assert.Nil(b, err)
+		assert.Nil(t, err)
 		time.Sleep(time.Microsecond)
 	}
-	assert.NotEmpty(b, chanIds)
+	assert.NotEmpty(t, chanIds)
 
 	clientChan, err = client.Channel()
-	assert.Nil(b, err)
-	assert.NotNil(b, clientChan)
+	assert.Nil(t, err)
+	assert.NotNil(t, clientChan)
 
 	serverChan, err = server.Channel(clientChan.chanId)
-	assert.Nil(b, err)
-	assert.NotNil(b, serverChan)
+	assert.Nil(t, err)
+	assert.NotNil(t, serverChan)
 
 	serverChan.connPoolLock.RLock()
-	assert.Equal(b, 5, len(serverChan.connPool))
+	assert.Equal(t, 5, len(serverChan.connPool))
 	serverChan.connPoolLock.RUnlock()
 
 	clientChan.connPoolLock.RLock()
-	assert.Equal(b, 5, len(clientChan.connPool))
+	assert.Equal(t, 5, len(clientChan.connPool))
 	clientChan.connPoolLock.RUnlock()
 
 	return
