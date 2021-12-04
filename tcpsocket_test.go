@@ -100,12 +100,17 @@ func TestSocketClosedConnection(t *testing.T) {
 	serverReceivedData := make(chan []byte, 10)
 	clientReceivedData := make(chan []byte, 10)
 
-	_, err = server.AddListener(func(channel *TcpChannel, err error) {
-		if channel.ChanId().Equal(cc.ChanId()) {
-			_, err = channel.AddReadListener(func(data []byte, err error) {
-				serverReceivedData <- data
-			})
-			assert.Nil(t, err)
+	_, err = server.AddEventListener(func(event Event) {
+		switch e := event.(type) {
+		case EventChanEstablished:
+			assert.Nil(t, e.Error())
+
+			if e.Channel().ChanId().Equal(cc.ChanId()) {
+				_, err = e.Channel().AddReadListener(func(data []byte, err error) {
+					serverReceivedData <- data
+				})
+				assert.Nil(t, err)
+			}
 		}
 	})
 	assert.Nil(t, err)
@@ -169,7 +174,9 @@ func BenchmarkSocket2(b *testing.B) {
 	}
 }
 
-func initServerClient(t assert.TestingT) (serverChan, clientChan *TcpChannel, server *Server, client *Client, closeFunc func(), err error) {
+func initServerClient(t assert.TestingT) (
+	serverChan, clientChan *TcpChannel, server *Server, client *Client, closeFunc func(), err error,
+) {
 	server = NewServer()
 
 	go func() {

@@ -17,7 +17,7 @@ var (
 func main() {
 	server = tcpsocket.NewServer()
 
-	_, err := server.AddListener(channelListener)
+	_, err := server.AddEventListener(eventListener)
 	if err != nil {
 		log.Panicln(err)
 	}
@@ -32,29 +32,38 @@ func main() {
 	}
 }
 
-func channelListener(channel *tcpsocket.TcpChannel, err error) {
-	addr, err := server.ChannelIds()
-	if err != nil {
-		log.Panicln(err)
-	}
-	log.Println("channel established", channel.ChanId(), addr)
-	_, err = channel.AddReadListener(func(data []byte, err error) {
-		i := int64(binary.LittleEndian.Uint64(data))
-		mu.Lock()
-		counter += i
-		res := make([]byte, 8)
-		binary.LittleEndian.PutUint64(res, uint64(counter))
-		log.Println("current: ", counter)
-		mu.Unlock()
+func eventListener(event tcpsocket.Event) {
+	switch e := event.(type) {
+	case tcpsocket.EventChanEstablished:
+		log.Println("channel established", e.Channel().ChanId())
+		log.Println(server.ChannelIds())
 
-		err = channel.Send(res, nil)
+		if e.Error() != nil {
+			log.Println(e.Error())
+			return
+		}
+
+		_, err := e.Channel().AddReadListener(func(data []byte, err error) {
+			i := int64(binary.LittleEndian.Uint64(data))
+			mu.Lock()
+			counter += i
+			res := make([]byte, 8)
+			binary.LittleEndian.PutUint64(res, uint64(counter))
+			log.Println("current: ", counter)
+			mu.Unlock()
+
+			err = e.Channel().Send(res, nil)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+		})
 		if err != nil {
 			log.Println(err)
 			return
 		}
-	})
-	if err != nil {
-		log.Println(err)
-		return
+	case tcpsocket.EventChanClosed:
+		log.Println("channel closed", e.Channel().ChanId())
+		log.Println(server.ChannelIds())
 	}
 }
