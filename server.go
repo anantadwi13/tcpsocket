@@ -16,14 +16,14 @@ type Server struct {
 	closeFuncs      []closeFunc
 	closeFuncsLock  sync.Mutex
 
-	channelListener     map[FixedId]ChannelListener
-	channelListenerLock sync.RWMutex
+	eventListener     map[FixedId]EventListener
+	eventListenerLock sync.RWMutex
 }
 
 func NewServer() *Server {
 	return &Server{
-		tcpChannels:     map[FixedId]*TcpChannel{},
-		channelListener: map[FixedId]ChannelListener{},
+		tcpChannels:   map[FixedId]*TcpChannel{},
+		eventListener: map[FixedId]EventListener{},
 	}
 }
 
@@ -48,11 +48,11 @@ func (s *Server) Listen(address string) error {
 		}
 
 		if !s.IsRunning() {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 
-		go func(conn net.Conn) {
+		go func(s *Server, conn net.Conn) {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Println("recover from panic", r)
@@ -67,7 +67,7 @@ func (s *Server) Listen(address string) error {
 			}
 
 			if !mId.Equal(JoinReqId) {
-				tcpConn.Close()
+				_ = tcpConn.Close()
 				log.Panicln("unable to join, join packet is required, found ", mId)
 			}
 
@@ -91,41 +91,45 @@ func (s *Server) Listen(address string) error {
 				s.closeFuncs = append(s.closeFuncs, s.closedConnectionHandler(tcpChan))
 				s.closeFuncsLock.Unlock()
 
-				s.channelListenerLock.RLock()
-				for _, listener := range s.channelListener {
-					listener(tcpChan, nil)
+				s.eventListenerLock.RLock()
+				for _, listener := range s.eventListener {
+					listener(&eventChanEstablished{
+						id:      newId(),
+						error:   nil,
+						channel: tcpChan,
+					})
 				}
-				s.channelListenerLock.RUnlock()
+				s.eventListenerLock.RUnlock()
 			} else {
 				s.tcpChannelsLock.Unlock()
 			}
 
 			err = tcpChan.addConn(tcpConn)
 			if err != nil {
-				tcpConn.Close()
+				_ = tcpConn.Close()
 				log.Panicln(err)
 			}
-			tcpConn.writeData(JoinOkId[:], chanIdBytes)
-		}(conn)
+			_ = tcpConn.writeData(JoinOkId[:], chanIdBytes)
+		}(s, conn)
 	}
 }
 
-func (s *Server) AddListener(listener ChannelListener) (listenerId FixedId, err error) {
+func (s *Server) AddEventListener(listener EventListener) (listenerId FixedId, err error) {
 	listenerId = newId().Fixed()
-	s.channelListenerLock.Lock()
-	s.channelListener[listenerId] = listener
-	s.channelListenerLock.Unlock()
+	s.eventListenerLock.Lock()
+	s.eventListener[listenerId] = listener
+	s.eventListenerLock.Unlock()
 	return
 }
 
-func (s *Server) RemoveListener(listenerId FixedId) (err error) {
-	s.channelListenerLock.Lock()
-	if listener, ok := s.channelListener[listenerId]; listener != nil && ok {
-		delete(s.channelListener, listenerId)
+func (s *Server) RemoveEventListener(listenerId FixedId) (err error) {
+	s.eventListenerLock.Lock()
+	if listener, ok := s.eventListener[listenerId]; listener != nil && ok {
+		delete(s.eventListener, listenerId)
 	} else {
 		err = errors.New("readListener not found")
 	}
-	s.channelListenerLock.Unlock()
+	s.eventListenerLock.Unlock()
 	return
 }
 
@@ -148,7 +152,7 @@ func (s *Server) Shutdown() error {
 
 	s.tcpChannelsLock.Lock()
 	for chanId, channel := range s.tcpChannels {
-		channel.Close()
+		_ = channel.Close()
 		delete(s.tcpChannels, chanId)
 	}
 	s.tcpChannelsLock.Unlock()
@@ -158,11 +162,11 @@ func (s *Server) Shutdown() error {
 	}
 	s.closeFuncs = []closeFunc{}
 	s.closeFuncsLock.Unlock()
-	s.channelListenerLock.Lock()
-	for id := range s.channelListener {
-		delete(s.channelListener, id)
+	s.eventListenerLock.Lock()
+	for id := range s.eventListener {
+		delete(s.eventListener, id)
 	}
-	s.channelListenerLock.Unlock()
+	s.eventListenerLock.Unlock()
 	return nil
 }
 
@@ -205,13 +209,25 @@ func (s *Server) Channel(channelId Id) (*TcpChannel, error) {
 }
 
 func (s *Server) closedConnectionHandler(tcpChan *TcpChannel) (f closeFunc) {
-	signalChan := make(chan bool, 1)
+	closeSignal := make(chan bool, 1)
 
 	f = func() {
-		signalChan <- true
+		closeSignal <- true
 	}
 
-	go func() {
+	go func(s *Server) {
+		defer func() {
+			s.eventListenerLock.RLock()
+			for _, listener := range s.eventListener {
+				listener(&eventChanClosed{
+					id:      newId(),
+					error:   nil,
+					channel: tcpChan,
+				})
+			}
+			s.eventListenerLock.RUnlock()
+		}()
+
 		for s.IsRunning() {
 			select {
 			case <-tcpChan.closedConn:
@@ -226,11 +242,11 @@ func (s *Server) closedConnectionHandler(tcpChan *TcpChannel) (f closeFunc) {
 				} else {
 					tcpChan.connPoolLock.RUnlock()
 				}
-			case <-signalChan:
+			case <-closeSignal:
 				return
 			}
 		}
-	}()
+	}(s)
 
 	return
 }

@@ -30,7 +30,7 @@ type TcpChannel struct {
 	writeCloseFuncsLock sync.Mutex
 }
 
-type ChannelListener func(channel *TcpChannel, err error)
+type EventListener func(event Event)
 type ChannelReadListener func(data []byte, err error)
 type closeFunc func()
 
@@ -116,7 +116,7 @@ func (c *TcpChannel) Close() error {
 	c.connPoolLock.Lock()
 	for conn := range c.connPool {
 		delete(c.connPool, conn)
-		conn.Close()
+		_ = conn.Close()
 	}
 	c.connPoolLock.Unlock()
 
@@ -218,7 +218,7 @@ func (c *TcpChannel) writeDaemon(conn *tcpConn) (f closeFunc) {
 			c.connPoolLock.Lock()
 			if _, ok := c.connPool[conn]; ok {
 				delete(c.connPool, conn)
-				conn.Close()
+				_ = conn.Close()
 				c.closedConn <- conn
 			}
 			c.connPoolLock.Unlock()
@@ -275,7 +275,7 @@ func (c *TcpChannel) readDaemon(conn *tcpConn) {
 			c.connPoolLock.Lock()
 			if _, ok := c.connPool[conn]; ok {
 				delete(c.connPool, conn)
-				conn.Close()
+				_ = conn.Close()
 				c.closedConn <- conn
 			}
 			c.connPoolLock.Unlock()
